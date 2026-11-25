@@ -4,7 +4,7 @@ import {COLOR,Complaint,DEPOT} from '../lib/types';import {orderPrioritizedRoute
 import FilePicker from '../components/FilePicker';
 import {ReportBadges} from '../components/Badges';
 import ComplaintDetails from '../components/ComplaintDetails';
-import {captureCleanupLocation} from '../lib/geolocation';
+import {captureCleanupLocation,CleanupLocation} from '../lib/geolocation';
 import {CleanupDraft} from '../lib/drafts';
 import {useCleanupDrafts} from '../lib/useCleanupDrafts';
 import Icon from '../components/Icon';
@@ -20,7 +20,7 @@ function targetClearText(dueAt:string|null|undefined):string{
  return `Target: overdue by ${Math.abs(diff)} h`;
 }
 
-function Job({r,n,save,pending}:{r:Complaint;n:number;save:(draft:CleanupDraft)=>Promise<void>;pending:boolean}){
+function Job({r,n,save,pending,locate}:{r:Complaint;n:number;save:(draft:CleanupDraft)=>Promise<void>;pending:boolean;locate:()=>Promise<CleanupLocation>}){
  const {profile}=useAuth();
  const [note,setNote]=useState(''),[file,setFile]=useState<File|null>(null),[err,setErr]=useState(''),[busy,setBusy]=useState(false);
 
@@ -30,7 +30,7 @@ function Job({r,n,save,pending}:{r:Complaint;n:number;save:(draft:CleanupDraft)=
   if(!profile)return setErr('Sign in again before clearing this report.');
   setBusy(true);setErr('');
   try{
-   const location=await captureCleanupLocation(r);
+   const location=await locate();
    await save({id:crypto.randomUUID(),userId:profile.id,reportId:r.id,note:note.trim(),file,location,createdAt:new Date().toISOString()});
    setNote('');setFile(null);
   }catch(e){setErr(e instanceof Error?e.message:'Unable to save cleanup. Please retry.')}finally{setBusy(false)}
@@ -45,7 +45,7 @@ function Job({r,n,save,pending}:{r:Complaint;n:number;save:(draft:CleanupDraft)=
    <FilePicker label="Completion photo (required)" file={file} onChange={setFile} id={`crew-photo-${r.id}`}/>
    <div className="geofence-note"><Icon name="shield" size={18}/><span>Capture GPS within <b>100 metres</b> of the report pin. Photos and GPS tags can be saved offline.</span></div>
    {err&&<p className="msg err" role="alert">{err}</p>}
-   <button className="btn success full" disabled={busy} onClick={clear}><Icon name={busy?'pin':'check'} size={18}/>{busy?'Capturing GPS & saving…':'Mark cleared'}</button>
+   <button className="btn success full" disabled={busy} onClick={clear}><Icon name={busy?'pin':'check'} size={18}/>{busy?'Finding GPS & saving (up to 60s)…':'Mark cleared'}</button>
   </details>}
   <ComplaintDetails report={r}/>
  </li>;
@@ -65,6 +65,7 @@ export default function Crew({view='route'}:{view?:string}){
  const [statusMsg,setStatusMsg]=useState('Connecting GPS…');
  const [isErrorMsg,setIsErrorMsg]=useState(false);
  const lastSent=useRef<number>(0);
+ const latestPosition=useRef<GeolocationPosition|null>(null);
 
  // Location watcher
  useEffect(()=>{
@@ -77,6 +78,7 @@ export default function Crew({view='route'}:{view?:string}){
 
   const id=navigator.geolocation.watchPosition(
    pos=>{
+    latestPosition.current=pos;
     const lat=pos.coords.latitude,lng=pos.coords.longitude;
     if(!manualPos){
      setStart([lat,lng]);
@@ -94,11 +96,11 @@ export default function Crew({view='route'}:{view?:string}){
    },
    err=>{
     if(!manualPos){
-     setStatusMsg('Location is blocked or unavailable. Tap the map to set your location.');
+     setStatusMsg(err.code===1?'Allow location access in your browser to use GPS.':err.code===3?'Still waiting for GPS. Keep location services enabled and try an open area.':'Location is unavailable. Check device location services or set your route start on the map.');
      setIsErrorMsg(true);
     }
    },
-   {enableHighAccuracy:true,timeout:15000,maximumAge:10000}
+   {enableHighAccuracy:true,timeout:60000,maximumAge:30000}
   );
 
   return()=>navigator.geolocation.clearWatch(id);
@@ -133,9 +135,6 @@ export default function Crew({view='route'}:{view?:string}){
   setManualPos(false);
   setStatusMsg('Resumed GPS tracking.');
   setIsErrorMsg(false);
-  navigator.geolocation?.getCurrentPosition(pos=>{
-   setStart([pos.coords.latitude,pos.coords.longitude]);
-  });
  }
 
  const mine=orderPrioritizedRoute(start,rows.filter(r=>r.collector_id===profile?.id&&r.status==='assigned'));
@@ -177,7 +176,7 @@ export default function Crew({view='route'}:{view?:string}){
   </>:<>
    <div className="metrics-grid"><StatCard label="Assigned jobs" value={mine.length} hint="Ordered by priority and distance" icon="truck"/><StatCard label="High priority" value={mine.filter(r=>r.priority==='high').length} hint="Start with the most urgent issues" icon="reports" tone="amber"/><StatCard label="Past target time" value={overdue.length} hint="Need a little extra attention" icon="clock" tone="red"/><StatCard label="Saved cleanups" value={queue.drafts.length} hint="Proof waiting to sync" icon="cloud" tone="blue"/></div>
    {queue.drafts.length>0&&<Link className="queue-notice" to="/app?view=saved"><Icon name="cloud"/><span><b>{queue.drafts.length} saved {queue.drafts.length===1?'cleanup':'cleanups'}</b> waiting to sync</span><span>View saved cleanups</span></Link>}
-   <div className="crew-route-grid"><div><div className="panel-heading split"><div><h2>Today’s jobs ({mine.length})</h2><p>Follow the suggested order, starting with high priority.</p></div><span className="count-pill">{mine.length} stops</span></div><ul className="list">{mine.map((r,i)=><Job key={r.id} r={r} n={i+1} save={queue.save} pending={queue.drafts.some(d=>d.reportId===r.id)}/>)}</ul>{!mine.length&&<div className="panel"><EmptyState title="You’re all caught up" message="New assignments will appear here as reports come in." icon="check"/></div>}</div>
+   <div className="crew-route-grid"><div><div className="panel-heading split"><div><h2>Today’s jobs ({mine.length})</h2><p>Follow the suggested order, starting with high priority.</p></div><span className="count-pill">{mine.length} stops</span></div><ul className="list">{mine.map((r,i)=><Job key={r.id} r={r} n={i+1} save={queue.save} pending={queue.drafts.some(d=>d.reportId===r.id)} locate={()=>captureCleanupLocation(r,latestPosition.current)}/>)}</ul>{!mine.length&&<div className="panel"><EmptyState title="You’re all caught up" message="New assignments will appear here as reports come in." icon="check"/></div>}</div>
     <div className="route-map-column"><div className="panel map-panel"><div className="panel-heading split"><div><h2>Your collection route</h2><p>Tap the map to adjust your starting point.</p></div><Icon name="pin"/></div><MapView height={390} route={path} points={mapPoints} onPick={handleMapPick}/><div className="map-legend"><span><i style={{background:'#14233a'}}/>Your starting point</span><span><i style={{background:'#2b6cff'}}/>Assigned job</span><span><i style={{background:'#c8402f'}}/>High priority</span></div><div className={`route-status ${isErrorMsg?'is-error':''}`} role="status"><Icon name={paused?'clock':'pin'} size={18}/><p>{!queue.online?'Offline. GPS and cleanup proof can still be saved on this device.':statusMsg}</p></div><div className="route-controls"><button className="btn ghost" onClick={togglePause}>{paused?'Resume sharing':'Pause sharing'}</button>{manualPos&&<button className="btn ghost" onClick={resumeGps}>Use GPS again</button>}</div></div><div className="help-card"><Icon name="shield" size={24}/><div><h3>Proof, right at the source.</h3><p>Each cleanup needs a photo, a short remark, and an accurate GPS tag within 100 metres of the pin.</p></div></div></div>
    </div>
   </>}
