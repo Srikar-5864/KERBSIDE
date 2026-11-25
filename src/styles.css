@@ -135,6 +135,27 @@ table{width:100%;border-collapse:collapse;font-size:.92rem}
 th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);vertical-align:middle}
 .scroll{overflow-x:auto}
 .job{display:grid;gap:10px}
+.report-card,.saved-report{display:block}
+.report-details{width:100%;margin-top:12px;border-top:1px solid var(--line);padding-top:10px}
+.report-details summary{cursor:pointer;font-weight:700;color:var(--route)}
+.report-details h3{font-size:1rem;margin:18px 0 8px}
+.report-details p,.saved-report p{overflow-wrap:anywhere;white-space:pre-wrap}
+.report-photos{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:12px}
+.report-photos figure{margin:0;min-width:0}
+.report-photos figcaption{font-weight:700;margin-bottom:6px}
+.report-photos img{width:100%;height:160px;object-fit:cover;border-radius:8px}
+.report-timeline{border-left:3px solid var(--route);padding-left:22px;margin-left:8px}
+.report-timeline li{padding:0 0 12px 4px}
+.report-timeline small,.report-comments small{display:block;color:var(--mute)}
+.report-timeline p,.report-comments p{margin:4px 0}
+.report-comments{list-style:none;padding:0;margin:0}
+.report-comments li{border-bottom:1px solid var(--line);padding:8px 0}
+.detail-hint{font-size:.88rem;color:var(--mute)}
+.detail-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+.detail-heading h3{margin:0;font-size:1.1rem}
+.detail-actions{display:flex;gap:8px;flex-wrap:wrap}
+.detail-actions .btn.ghost{margin-left:0}
+.report-link{background:none;border:0;padding:0;color:var(--route);font:inherit;font-weight:700;text-decoration:underline;cursor:pointer;text-align:left}
 .job img,.item img{max-width:100%;border-radius:8px}
 .mt{margin-top:16px}
 @media (max-width:860px){.dash{grid-template-columns:1fr}}

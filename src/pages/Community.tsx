@@ -5,6 +5,8 @@ import {levelFor} from '../lib/levels';
 import {COLOR,Priority} from '../lib/types';
 import MapView,{Pt} from '../MapView';
 import {ReportBadges} from '../components/Badges';
+import Icon from '../components/Icon';
+import EmptyState from '../components/EmptyState';
 
 export interface NearbyComplaint {
  id:string;
@@ -123,105 +125,15 @@ export default function Community(){
   highPriority:r.priority==='high'
  }));
 
- return (
-  <div>
-   <div style={{marginBottom:16}}>
-    <h2 style={{fontSize:'1.4rem',marginBottom:4}}>Community Reports (within 2 km)</h2>
-    <p className="sub" style={{marginBottom:8}}>
-     Support open reports in your neighbourhood to help city crews prioritize high-impact issues.
-    </p>
-    {locError&&<p className="msg err" style={{margin:'6px 0'}}>{locError}</p>}
-    {actionMsg.t&&<p className={`msg ${actionMsg.c}`} style={{margin:'6px 0'}} role="status">{actionMsg.t}</p>}
-   </div>
-
-   <div className="dash">
-    <div>
-     <MapView
-      height={380}
-      circle={center?{center,radiusKm:2}:null}
-      pick={center}
-      onPick={(lat,lng)=>{
-       setCenter([lat,lng]);
-       setLocError('');
-       loadNearby(lat,lng);
-      }}
-      points={mapPoints}
-     />
-
-     {/* Legend under community map */}
-     <div className="map-legend">
-      <span className="map-legend-item">
-       <span className="map-legend-dot" style={{backgroundColor:'#c8402f'}} aria-hidden="true"/>
-       <span>Reported</span>
-      </span>
-      <span className="map-legend-item">
-       <span className="map-legend-dot" style={{backgroundColor:'#2b6cff'}} aria-hidden="true"/>
-       <span>Crew on the way</span>
-      </span>
-      <span className="map-legend-item">
-       <span className="map-legend-high" aria-hidden="true">!</span>
-       <span>High priority</span>
-      </span>
-     </div>
-
-     <p style={{fontSize:'.84rem',color:'var(--mute)',marginTop:6}}>
-      Showing reports within 2 km of the pin. Tap the map to reposition.
-     </p>
-    </div>
-
-    <div>
-     <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
-      <b>Nearby Issues ({reports.length})</b>
-      {loading&&<small style={{color:'var(--mute)'}}>Refreshing…</small>}
-     </div>
-
-     {reports.length===0&&!loading&&(
-      <div className="panel" style={{textAlign:'center',padding:'32px 16px',color:'var(--mute)'}}>
-       No open reports near you.
-      </div>
-     )}
-
-     <ul className="list">
-      {reports.map(r=>{
-       const isAwaiting=r.category==='Other' && r.priority==='medium';
-       return (
-        <li className="item" key={r.id} style={{flexDirection:'column',alignItems:'stretch',gap:8}}>
-         <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:8}}>
-          <div>
-           <b style={{fontSize:'1rem'}}>{r.category}</b>
-           <small style={{marginTop:2}}>{r.description}</small>
-           <div style={{display:'flex',gap:8,alignItems:'center',marginTop:4,flexWrap:'wrap'}}>
-            <small style={{color:'var(--mute)'}}>{timeAgo(r.created_at)}</small>
-            <small style={{color:'var(--route)',fontWeight:600}}>{targetClearText(r.due_at)}</small>
-           </div>
-          </div>
-
-          <ReportBadges
-           status={r.status}
-           priority={r.priority}
-           needsReview={isAwaiting}
-          />
-         </div>
-
-         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:4,borderTop:'1px solid var(--line)',paddingTop:8}}>
-          <span style={{fontSize:'.88rem',color:'var(--mute)'}}>
-           Support: <b>{r.support}</b> from {r.voters} {r.voters===1?'resident':'residents'}
-          </span>
-          <button
-           className="btn hi"
-           style={{padding:'6px 14px',fontSize:'.88rem'}}
-           disabled={r.voted || r.mine || votingId===r.id}
-           onClick={()=>handleVote(r)}
-          >
-           {r.mine?'Your report':r.voted?'Supported':`Upvote (+${weight})`}
-          </button>
-         </div>
-        </li>
-       );
-      })}
-     </ul>
-    </div>
+ return <>
+  <div className="page-heading"><div><p className="eyebrow">A LITTLE SUPPORT GOES A LONG WAY</p><h1>Better, together.</h1><p>See what’s happening within 2 km, and help the right issues get noticed.</p></div><span className="count-pill">Your vote adds {weight} support</span></div>
+  {actionMsg.t&&<p className={`msg ${actionMsg.c}`} role="status">{actionMsg.t}</p>}
+  <div className="community-layout">
+   <div className="panel map-panel community-map"><div className="panel-heading"><span className="section-symbol"><Icon name="pin"/></span><div><h2>Your neighborhood</h2><p>Tap the map to explore another spot nearby.</p></div></div><MapView height={400} circle={center?{center,radiusKm:2}:null} pick={center} onPick={(lat,lng)=>{setCenter([lat,lng]);setLocError('');loadNearby(lat,lng)}} points={mapPoints}/><div className="map-legend"><span><i style={{background:'#c8402f'}}/>Reported</span><span><i style={{background:'#2b6cff'}}/>Crew assigned</span><span><i style={{background:'#c8402f'}}/>High priority</span></div>{locError&&<p className="msg err" role="status">{locError}</p>}<p className="field-help">Showing open reports within 2 km of your pin.</p></div>
+   <div><div className="panel-heading split"><div><h2>Nearby issues</h2><p>Support the reports that matter to your community.</p></div><span className="count-pill">{loading?'Refreshing…':`${reports.length} nearby`}</span></div>
+    {!reports.length&&!loading&&<div className="panel"><EmptyState title="A quiet corner of the city" message="There are no open reports around this pin. Move the pin to explore another area." icon="leaf"/></div>}
+    <ul className="list">{reports.map(r=><li className="item report-card community-report" key={r.id}><div className="report-card-main"><span className="section-symbol"><Icon name="reports"/></span><div className="report-card-copy"><span className="report-reference">{timeAgo(r.created_at)} · WITHIN 2 KM</span><h3>{r.category}</h3><p>{r.description}</p></div></div><div className="report-card-meta"><ReportBadges status={r.status} priority={r.priority} needsReview={r.category==='Other'&&r.priority==='medium'}/><span><Icon name="clock" size={15}/>{targetClearText(r.due_at)}</span></div><div className="community-support"><span><b>{r.support} support</b><br/>{r.voters} {r.voters===1?'resident':'residents'} helping this get noticed</span><button className="btn hi" disabled={r.voted||r.mine||votingId===r.id} onClick={()=>handleVote(r)}><Icon name="plus" size={16}/>{r.mine?'Your report':r.voted?'Supported':votingId===r.id?'Supporting…':`Support (+${weight})`}</button></div></li>)}</ul>
    </div>
   </div>
- );
+ </>;
 }

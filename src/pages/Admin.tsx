@@ -1,9 +1,14 @@
-import {FormEvent,useCallback,useEffect,useMemo,useState} from 'react';
+import {FormEvent,useCallback,useEffect,useMemo,useRef,useState} from 'react';
 import {supabase,createIsolatedClient} from '../lib/supabase';
 import {useComplaints} from '../lib/useComplaints';
 import {CATEGORIES,COLOR,LABEL,Priority,Profile,Complaint} from '../lib/types';
 import MapView,{Pt} from '../MapView';
 import {StatusBadge,PriorityBadge,ReportBadges} from '../components/Badges';
+import ComplaintDetails from '../components/ComplaintDetails';
+import Hotspots from '../components/Hotspots';
+import Icon from '../components/Icon';
+import StatCard from '../components/StatCard';
+import EmptyState from '../components/EmptyState';
 
 interface Bin{id:string;lat:number;lng:number;fill:number}
 
@@ -38,7 +43,7 @@ function targetClearText(dueAt:string|null|undefined):string{
  return `Target: overdue by ${Math.abs(diff)} h`;
 }
 
-export default function Admin(){
+export default function Admin({view='overview'}:{view?:string}){
  const {rows,load}=useComplaints();
  const [people,setPeople]=useState<Profile[]>([]);
  const [bins,setBins]=useState<Bin[]>([]);
@@ -47,7 +52,10 @@ export default function Admin(){
  // Filters
  const [statusFilter,setStatusFilter]=useState<string>('all');
  const [categoryFilter,setCategoryFilter]=useState<string>('all');
+ const [search,setSearch]=useState('');
+ const dialog=useRef<HTMLDialogElement>(null);
  const [selectedComplaint,setSelectedComplaint]=useState<Complaint|null>(null);
+ useEffect(()=>{if(selectedComplaint&&!dialog.current?.open)dialog.current?.showModal();else if(!selectedComplaint)dialog.current?.close()},[selectedComplaint?.id]);
 
  // Priority override modal / inline state
  const [overridePriority,setOverridePriority]=useState<string>('');
@@ -120,7 +128,8 @@ export default function Admin(){
  },[rows]);
 
  async function assign(id:string,cid:string){
-  await supabase.from('complaints').update({collector_id:cid||null,status:cid?'assigned':'reported'}).eq('id',id);
+  const {error}=await supabase.from('complaints').update({collector_id:cid||null,status:cid?'assigned':'reported'}).eq('id',id);
+  if(error){setMsg(`Could not assign crew: ${error.message}`);return}
   load();
   fetchAll();
   if(selectedComplaint?.id===id){
@@ -193,7 +202,7 @@ export default function Admin(){
   const a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
   a.download='kerbside-report.csv';
-  a.click();
+  a.click();URL.revokeObjectURL(a.href);
  }
 
  async function handleCreateCollector(e:FormEvent){
@@ -209,7 +218,8 @@ export default function Admin(){
    });
    if(error)throw error;
    if(data.user){
-    await supabase.from('profiles').update({role:'collector',name:collectorName,email:collectorEmail}).eq('id',data.user.id);
+    const {error:roleError}=await supabase.from('profiles').update({role:'collector',name:collectorName,email:collectorEmail}).eq('id',data.user.id);
+    if(roleError)throw roleError;
    }
    setCollectorMsg({t:`Collector account created for ${collectorEmail}!`,c:'good'});
    setCollectorName('');setCollectorEmail('');setCollectorPassword('');
@@ -235,6 +245,7 @@ export default function Admin(){
  const filteredRows=rows.filter(r=>{
   if(statusFilter!=='all'&&r.status!==statusFilter)return false;
   if(categoryFilter!=='all'&&r.category!==categoryFilter)return false;
+  if(search&&!`${r.category} ${r.description} ${r.id}`.toLowerCase().includes(search.toLowerCase()))return false;
   return true;
  });
 
@@ -269,503 +280,77 @@ export default function Admin(){
    color:r.status==='rejected'?'#8892a0':COLOR[r.status]||'#2b6cff',
    label:`${r.category} [${r.priority}]: ${LABEL[r.status]||r.status}`,
    highPriority:r.priority==='high',
-   onClick:()=>{
-    setSelectedComplaint(r);
-    setOverridePriority(r.priority_override||r.priority||'');
-    setOverrideReason(r.override_reason||'');
-   }
+   onClick:()=>selectReport(r)
   }))
  ];
 
- return (
-  <div style={{paddingBottom:48}}>
-   {/* 1. TOP STAT CARDS */}
-   <div className="stats" style={{gridTemplateColumns:'repeat(auto-fit,minmax(210px,1fr))',gap:12}}>
-    <div className="stat" style={{border:unassignedRows.length>0?'2px solid var(--bad)':'2px solid var(--line)'}}>
-     <b style={{color:unassignedRows.length>0?'var(--bad)':'inherit'}}>{unassignedRows.length}</b>
-     <span style={{fontWeight:700}}>Unassigned</span>
-     <small style={{display:'block',color:'var(--mute)',marginTop:2}}>
-      {unassignedRows.length>0?'Awaiting crew dispatch':'All reports assigned'}
-     </small>
-    </div>
-
-    <div className="stat" style={{border:overdueRows.length>0?'2px solid var(--bad)':'2px solid var(--line)'}}>
-     <b style={{color:overdueRows.length>0?'var(--bad)':'inherit'}}>{overdueRows.length}</b>
-     <span style={{fontWeight:700}}>Overdue</span>
-     <small style={{display:'block',color:'var(--mute)',marginTop:2}}>
-      {overdueRows.length>0?'Exceeded resolution target time':'No overdue jobs.'}
-     </small>
-    </div>
-
-    <div className="stat">
-     <b>{openRows.length} <small style={{fontSize:'1.1rem',color:'var(--mute)',fontWeight:500}}>of {rows.length} total</small></b>
-     <span style={{fontWeight:700}}>Open now</span>
-     <small style={{display:'block',color:'var(--mute)',marginTop:2}}>Currently in progress</small>
-    </div>
-
-    <div className="stat">
-     <b>{clearedThisWeek.length}</b>
-     <span style={{fontWeight:700}}>Cleared this week</span>
-     <small style={{display:'block',color:'var(--mute)',marginTop:2}}>Resolved past 7 days</small>
-    </div>
+ function selectReport(report:Complaint){setSelectedComplaint(report);setOverridePriority(report.priority_override||'default');setOverrideReason(report.override_reason||'')}
+ const selected=rows.find(r=>r.id===selectedComplaint?.id)||selectedComplaint;
+ const titles:Record<string,[string,string,string]>={
+  overview:['THE CITY, AT A GLANCE','A cleaner city starts here.','A clear view of the issues, crews, and cleanups that matter.'],
+  reports:['EVERY REPORT COUNTS','All reports','Review issues, assign the right crew, and follow every cleanup.'],
+  map:['A SHARED VIEW','City map','See reports, collection crews, and waste infrastructure in one place.'],
+  hotspots:['SPOT THE PATTERNS','Recurring hotspots','Find the places that need more than a one-time cleanup.'],
+  team:['THE PEOPLE BEHIND THE PROGRESS','Team & access','Coordinate collection crews and manage workspace permissions.'],
+ };
+ const [eyebrow,title,description]=titles[view]||titles.overview;
+ const filters=<div className="admin-toolbar">
+  <div className="search-field"><Icon name="search" size={17}/><input type="search" aria-label="Search reports" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search category, description, or report ID"/></div>
+  <select aria-label="Filter reports by status" value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}><option value="all">All statuses</option><option value="reported">Reported</option><option value="assigned">Assigned</option><option value="cleared">Cleared</option><option value="rejected">Rejected</option></select>
+  <select aria-label="Filter reports by category" value={categoryFilter} onChange={e=>setCategoryFilter(e.target.value)}><option value="all">All categories</option>{CATEGORIES.map(c=><option key={c}>{c}</option>)}</select>
+ </div>;
+ const cityMap=<div className="panel map-panel">
+  <div className="panel-heading split"><div><h2>City activity</h2><p>Reports, crews, and bins. Select a report pin for details.</p></div><span className="count-pill">{openRows.length} open reports</span></div>
+  {view==='map'&&filters}<MapView height={view==='map'?530:360} points={mapPoints}/>
+  <div className="map-legend"><span><i style={{background:'#c8402f'}}/>Reported</span><span><i style={{background:'#2b6cff'}}/>Assigned</span><span><i style={{background:'#2f7d57'}}/>Cleared</span><span><i style={{background:'#f2c230'}}/>Bins</span><span><i style={{background:'#14233a'}}/>Active crews</span></div>
+ </div>;
+ return <>
+  <div className="page-heading"><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p>{description}</p></div><div className="detail-actions"><button className="btn ghost" onClick={()=>{load();fetchAll()}}><Icon name="refresh" size={17}/>Refresh</button>{view==='reports'&&<button className="btn hi" onClick={exportCsv}><Icon name="download" size={17}/>Export CSV</button>}</div></div>
+  {msg&&<p className="msg" role="status">{msg}</p>}
+  {(view==='overview'||view==='reports')&&<div className="metrics-grid">
+   <StatCard label="Open reports" value={openRows.length} hint={`${rows.length} reports in total`} icon="reports"/>
+   <StatCard label="Awaiting assignment" value={unassignedRows.length} hint="Ready for crew dispatch" icon="truck" tone="amber"/>
+   <StatCard label="Past target time" value={overdueRows.length} hint="Need your attention" icon="clock" tone="red"/>
+   <StatCard label="Cleared this week" value={clearedThisWeek.length} hint="Cleanups in the last 7 days" icon="check"/>
+  </div>}
+  {view==='overview'&&<>
+   <div className="admin-overview-grid">{cityMap}<div className="panel"><div className="panel-heading split"><div><h2>Needs attention</h2><p>The oldest open reports.</p></div><span className="count-pill">{openRows.length} open</span></div>
+    {!oldestOpen.length?<EmptyState title="All caught up" message="No open reports need attention right now." icon="check"/>:<ul className="attention-list">{oldestOpen.map(r=><li key={r.id}><span className="report-thumbnail">{r.image_url?<img src={r.image_url} alt=""/>:<Icon name="reports"/>}</span><div className="attention-copy"><button type="button" onClick={()=>selectReport(r)}><b>{r.category}</b></button><small>{timeAgo(r.created_at)} · {r.collector_id?nameOf(r.collector_id):'Unassigned'}</small></div><PriorityBadge priority={r.priority}/></li>)}</ul>}
+   </div></div>
+   <div className="admin-analytics-grid"><div className="panel"><div className="panel-heading split"><div><h2>Reports this week</h2><p>Incoming reports over the past 7 days.</p></div><span className="count-pill">{dailyStats.days.reduce((sum,d)=>sum+d.count,0)} reports</span></div>
+    <div className="chart-bars" role="img" aria-label={dailyStats.days.map(d=>`${d.dayName}: ${d.count} reports`).join(', ')}>{dailyStats.days.map(d=><div className="chart-column" key={d.dateStr}><span>{d.count}</span><i style={{height:`${Math.max(2,d.count/dailyStats.max*130)}px`}}/></div>)}</div><div className="chart-labels" aria-hidden="true">{dailyStats.days.map(d=><span key={d.dateStr}>{new Date(`${d.dateStr}T12:00:00`).toLocaleDateString(undefined,{weekday:'short'})}</span>)}</div>
+   </div><div className="panel"><div className="panel-heading"><div><h2>What’s being reported</h2><p>Issue categories across all reports.</p></div></div>{!categoryShares.length?<EmptyState title="No reports yet" message="Category insights will appear as reports come in." icon="chart"/>:categoryShares.map(item=><div className="category-row" key={item.category}><div><span>{item.category}</span><b>{item.pct}%</b></div><div className="category-track"><i style={{width:`${item.pct}%`}}/></div></div>)}</div></div>
+  </>}
+  {view==='map'&&cityMap}
+  {view==='hotspots'&&<Hotspots/>}
+  {view==='reports'&&<div className="panel"><div className="panel-heading split"><div><h2>Report queue</h2><p>Select a report to review its timeline, proof, and comments.</p></div><button className="btn hi" onClick={handleAutoAssign}><Icon name="truck" size={17}/>Auto-assign crews</button></div>
+   {filters}
+   <div className="table-container"><div className="scroll"><table><thead><tr><th>Report</th><th>Description</th><th>Priority</th><th>Status</th><th>Target</th><th>Assigned crew</th></tr></thead><tbody>{filteredRows.map(r=><tr key={r.id}>
+    <td className="table-category"><button type="button" className="report-link" onClick={()=>selectReport(r)}>{r.category}</button><small>#{r.id.slice(0,6).toUpperCase()} · {r.voters} {r.voters===1?'resident':'residents'}</small></td><td className="table-description">{r.description}</td><td><PriorityBadge priority={r.priority} needsReview={r.needs_review}/></td><td><StatusBadge status={r.status}/></td><td><small>{r.status==='cleared'?'Completed':r.status==='rejected'?'Closed':targetClearText(r.due_at)}</small></td>
+    <td>{r.status==='cleared'||r.status==='rejected'?nameOf(r.collector_id):<select aria-label={`Assign crew for ${r.category} ${r.id.slice(0,6)}`} value={r.collector_id||''} onChange={e=>assign(r.id,e.target.value)}><option value="">Unassigned</option>{crews.map(c=><option key={c.id} value={c.id}>{c.name||c.email||'Crew member'}</option>)}</select>}</td>
+   </tr>)}</tbody></table>{!filteredRows.length&&<EmptyState title={rows.length?'No matching reports':'A fresh start'} message={rows.length?'Try a different search or clear the filters.':'New reports will appear here as residents send them in.'}/>}</div></div>
+  </div>}
+  {view==='team'&&<div className="admin-section">
+   <div className="panel"><div className="panel-heading split"><div><h2>Crew performance</h2><p>Current workloads, recent cleanups, and location updates.</p></div><span className="count-pill">{crews.length} collectors</span></div>
+    <div className="table-container"><div className="scroll"><table><thead><tr><th>Crew member</th><th>Open jobs</th><th>Cleared this week</th><th>Average cleanup time</th><th>Workload</th><th>Last location</th></tr></thead><tbody>{crews.map(c=>{
+     const assigned=rows.filter(r=>r.collector_id===c.id&&r.status==='assigned'),cleared=rows.filter(r=>r.collector_id===c.id&&r.status==='cleared'&&r.cleared_at);
+     const week=cleared.filter(r=>new Date(r.cleared_at!).getTime()>=oneWeekAgo);
+     const avg=cleared.length?cleared.reduce((sum,r)=>sum+new Date(r.cleared_at!).getTime()-new Date(r.created_at).getTime(),0)/cleared.length:0;
+     return <tr key={c.id}><td><div className="table-identity"><span className="avatar">{(c.name||'C')[0].toUpperCase()}</span><div><b>{c.name||'Crew member'}</b><small>{c.email}</small></div></div></td><td>{assigned.length}</td><td>{week.length}</td><td>{cleared.length?formatDuration(avg):'No completed jobs'}</td><td><div className="crew-workload"><i style={{width:`${Math.min(100,assigned.length/(openRows.length||1)*100)}%`}}/></div></td><td>{c.location_at?timeAgo(c.location_at):'Not shared yet'}</td></tr>;
+    })}</tbody></table>{!crews.length&&<EmptyState title="Build your collection team" message="Create the first collector account below." icon="users"/>}</div></div>
    </div>
-
-   {/* 2. OLDEST OPEN COMPLAINTS */}
-   <div className="panel mt">
-    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8,marginBottom:8}}>
-     <div>
-      <b style={{fontSize:'1.1rem'}}>Oldest open complaints</b>
-      <p style={{margin:'2px 0 0',color:'var(--mute)',fontSize:'.88rem'}}>Top 5 oldest unresolved issues requiring attention.</p>
-     </div>
-    </div>
-
-    {oldestOpen.length===0?(
-     <p style={{color:'var(--mute)',margin:'12px 0'}}>No open reports right now.</p>
-    ):(
-     <div className="scroll">
-      <table>
-       <thead>
-        <tr>
-         <th>Thumbnail</th>
-         <th>Category & Note</th>
-         <th>Age / Target</th>
-         <th>Priority</th>
-         <th>Assign Crew</th>
-         <th>Action</th>
-        </tr>
-       </thead>
-       <tbody>
-        {oldestOpen.map(r=>(
-         <tr key={r.id}>
-          <td style={{width:60}}>
-           {r.image_url?(
-            <img src={r.image_url} alt="" style={{width:44,height:44,objectFit:'cover',borderRadius:6}}/>
-           ):(
-            <div style={{width:44,height:44,background:'var(--bg)',borderRadius:6,display:'grid',placeItems:'center',color:'var(--mute)',fontSize:'.75rem'}}>No img</div>
-           )}
-          </td>
-          <td>
-           <b>{r.category}</b>
-           <small style={{display:'block',color:'var(--mute)'}}>{r.description}</small>
-          </td>
-          <td>
-           <span>{timeAgo(r.created_at)}</span>
-           <small style={{display:'block',color:'var(--route)',fontWeight:600}}>{targetClearText(r.due_at)}</small>
-          </td>
-          <td>
-           <PriorityBadge priority={r.priority} />
-          </td>
-          <td>
-           <select
-            aria-label="Assign crew"
-            value={r.collector_id??''}
-            onChange={e=>assign(r.id,e.target.value)}
-            style={{padding:'4px 8px'}}
-           >
-            <option value="">Unassigned</option>
-            {crews.map(c=><option key={c.id} value={c.id}>{c.name||c.email||c.id.slice(0,6)}</option>)}
-           </select>
-          </td>
-          <td>
-           <button
-            className="btn ghost"
-            style={{padding:'4px 10px',fontSize:'.82rem',color:'var(--bad)',borderColor:'var(--bad)'}}
-            onClick={()=>handleMarkFake(r.id)}
-           >
-            Mark fake
-           </button>
-          </td>
-         </tr>
-        ))}
-       </tbody>
-      </table>
-     </div>
-    )}
-   </div>
-
-   {/* 3. MAP WITH FILTERS, LEGEND, AND DETAIL CARD */}
-   <div className="panel mt">
-    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8,marginBottom:12}}>
-     <b>City Map & Infrastructure</b>
-     {/* Filter chips */}
-     <div style={{display:'flex',gap:6,flexWrap:'wrap',alignItems:'center'}}>
-      <label style={{margin:0,fontSize:'.85rem'}}>Status:</label>
-      <select value={statusFilter} onChange={e=>setStatusFilter(e.target.value)} style={{width:'auto',padding:'4px 8px'}}>
-       <option value="all">All statuses</option>
-       <option value="reported">Reported</option>
-       <option value="assigned">Assigned</option>
-       <option value="cleared">Cleared</option>
-       <option value="rejected">Rejected (fake)</option>
-      </select>
-
-      <label style={{margin:0,fontSize:'.85rem',marginLeft:8}}>Category:</label>
-      <select value={categoryFilter} onChange={e=>setCategoryFilter(e.target.value)} style={{width:'auto',padding:'4px 8px'}}>
-       <option value="all">All categories</option>
-       {CATEGORIES.map(c=><option key={c} value={c}>{c}</option>)}
-      </select>
-     </div>
-    </div>
-
-    <MapView height={420} points={mapPoints}/>
-
-    {/* Map Legend */}
-    <div style={{display:'flex',gap:16,flexWrap:'wrap',alignItems:'center',padding:'10px 4px 0',fontSize:'.85rem',color:'var(--mute)'}}>
-     <span style={{display:'flex',alignItems:'center',gap:4}}>
-      <b style={{display:'inline-block',width:10,height:10,borderRadius:'50%',background:'#c8402f'}}/> Reported
-     </span>
-     <span style={{display:'flex',alignItems:'center',gap:4}}>
-      <b style={{display:'inline-block',width:10,height:10,borderRadius:'50%',background:'#2b6cff'}}/> Assigned
-     </span>
-     <span style={{display:'flex',alignItems:'center',gap:4}}>
-      <b style={{display:'inline-block',width:10,height:10,borderRadius:'50%',background:'#2f7d57'}}/> Cleared
-     </span>
-     <span style={{display:'flex',alignItems:'center',gap:4}}>
-      <b style={{display:'inline-block',width:10,height:10,borderRadius:'50%',background:'#8892a0'}}/> Rejected / Fake
-     </span>
-     <span style={{display:'flex',alignItems:'center',gap:4}}>
-      <b style={{display:'inline-block',width:10,height:10,background:'#f2c230',border:'1px solid #fff'}}/> Bin
-     </span>
-     <span style={{display:'flex',alignItems:'center',gap:4}}>
-      <b style={{display:'inline-block',width:10,height:10,background:'#c8402f',border:'1px solid #fff'}}/> Bin (&gt;80%)
-     </span>
-     <span style={{display:'flex',alignItems:'center',gap:4}}>
-      <b style={{display:'inline-block',width:12,height:12,borderRadius:'50%',border:'3px solid #14233a',background:'transparent'}}/> Active Crew
-     </span>
-     <span style={{display:'flex',alignItems:'center',gap:4}}>
-      <b style={{display:'inline-block',width:12,height:12,borderRadius:'50%',border:'3px solid #8892a0',background:'transparent'}}/> Inactive Crew (&gt;30m)
-     </span>
-     <span style={{display:'flex',alignItems:'center',gap:4}}>
-      <b style={{display:'inline-flex',width:14,height:14,borderRadius:'50%',background:'#c8402f',color:'#fff',fontSize:10,fontWeight:900,alignItems:'center',justifyContent:'center',border:'1.5px solid #fff',lineHeight:1}}>!</b> High Priority
-     </span>
-    </div>
-
-    {/* Selected Complaint Detail Card */}
-    {selectedComplaint&&(
-     <div className="panel mt" style={{background:'var(--bg)',border:'2px solid var(--route)',position:'relative'}}>
-      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:12}}>
-       <div>
-        <h3 style={{margin:'0 0 4px',fontSize:'1.2rem'}}>{selectedComplaint.category}</h3>
-        <p style={{margin:'0 0 8px'}}>{selectedComplaint.description}</p>
-        <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap',fontSize:'.88rem'}}>
-         <ReportBadges status={selectedComplaint.status} priority={selectedComplaint.priority} needsReview={selectedComplaint.needs_review} />
-         <span style={{color:'var(--mute)'}}>{timeAgo(selectedComplaint.created_at)}</span>
-         <span style={{color:'var(--route)',fontWeight:600}}>{targetClearText(selectedComplaint.due_at)}</span>
-        </div>
-        {selectedComplaint.override_reason&&(
-         <p style={{fontSize:'.84rem',color:'var(--mute)',margin:'6px 0 0'}}>
-          Override reason: <i>{selectedComplaint.override_reason}</i>
-         </p>
-        )}
-       </div>
-
-       {selectedComplaint.image_url&&(
-        <img src={selectedComplaint.image_url} alt="" style={{width:90,height:90,objectFit:'cover',borderRadius:8}}/>
-       )}
-      </div>
-
-      {/* Priority Override & Action controls */}
-      <div style={{marginTop:14,borderTop:'1px solid var(--line)',paddingTop:12,display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:12,alignItems:'end'}}>
-       <form onSubmit={handleSetPriority} style={{display:'contents'}}>
-        <div>
-         <label style={{margin:'0 0 4px',fontSize:'.82rem'}}>Override Priority</label>
-         <select value={overridePriority} onChange={e=>setOverridePriority(e.target.value)} style={{padding:'6px'}}>
-          <option value="default">Default ({selectedComplaint.base_priority})</option>
-          <option value="high">High</option>
-          <option value="medium">Medium</option>
-          <option value="low">Low</option>
-         </select>
-        </div>
-        <div>
-         <label style={{margin:'0 0 4px',fontSize:'.82rem'}}>Reason</label>
-         <input type="text" placeholder="Reason for override" value={overrideReason} onChange={e=>setOverrideReason(e.target.value)}/>
-        </div>
-        <div>
-         <button className="btn hi" style={{padding:'7px 14px',fontSize:'.88rem'}} disabled={overrideBusy}>
-          Save Priority
-         </button>
-        </div>
-       </form>
-
-       <div style={{display:'flex',gap:8,alignItems:'center'}}>
-        <div style={{flex:1}}>
-         <label style={{margin:'0 0 4px',fontSize:'.82rem'}}>Assign Crew</label>
-         <select
-          value={selectedComplaint.collector_id??''}
-          onChange={e=>assign(selectedComplaint.id,e.target.value)}
-          style={{padding:'6px'}}
-         >
-          <option value="">Unassigned</option>
-          {crews.map(c=><option key={c.id} value={c.id}>{c.name||c.email||c.id.slice(0,6)}</option>)}
-         </select>
-        </div>
-        <button
-         className="btn ghost"
-         style={{padding:'7px 12px',fontSize:'.88rem',color:'var(--bad)',borderColor:'var(--bad)',marginTop:18}}
-         onClick={()=>handleMarkFake(selectedComplaint.id)}
-        >
-         Mark fake
-        </button>
-        <button
-         className="btn ghost"
-         style={{padding:'7px 12px',fontSize:'.88rem',marginTop:18}}
-         onClick={()=>setSelectedComplaint(null)}
-        >
-         Close
-        </button>
-       </div>
-      </div>
-     </div>
-    )}
-   </div>
-
-   {/* 4. 7-DAY BAR CHART & CATEGORY SHARE */}
-   <div className="dash mt">
-    {/* Plain SVG Bar Chart */}
-    <div className="panel">
-     <b>Complaints Past 7 Days</b>
-     <p style={{margin:'2px 0 12px',color:'var(--mute)',fontSize:'.88rem'}}>Volume of incoming reports per day.</p>
-
-     <div style={{width:'100%',overflowX:'auto'}}>
-      <svg viewBox="0 0 350 160" style={{width:'100%',maxWidth:420,height:'auto',display:'block'}}>
-       {/* Grid lines */}
-       <line x1="30" y1="20" x2="330" y2="20" stroke="var(--line)" strokeDasharray="3 3"/>
-       <line x1="30" y1="70" x2="330" y2="70" stroke="var(--line)" strokeDasharray="3 3"/>
-       <line x1="30" y1="120" x2="330" y2="120" stroke="var(--line)"/>
-
-       {dailyStats.days.map((d,idx)=>{
-        const x=45+idx*40;
-        const barH=(d.count/dailyStats.max)*90;
-        const y=120-barH;
-        return (
-         <g key={d.dateStr}>
-          <rect x={x} y={y} width="24" height={barH} fill="var(--hi)" rx="4"/>
-          {d.count>0&&(
-           <text x={x+12} y={Math.max(16,y-4)} textAnchor="middle" fill="var(--ink)" fontSize="11" fontWeight="700">
-            {d.count}
-           </text>
-          )}
-          <text x={x+12} y="138" textAnchor="middle" fill="var(--mute)" fontSize="10">
-           {d.dayName.split(' ')[0]}
-          </text>
-         </g>
-        );
-       })}
-      </svg>
-     </div>
-    </div>
-
-    {/* Category Share Percentages */}
-    <div className="panel">
-     <b>Category Share</b>
-     <p style={{margin:'2px 0 12px',color:'var(--mute)',fontSize:'.88rem'}}>Percentage breakdown of total reports.</p>
-
-     {categoryShares.length===0?(
-      <p style={{color:'var(--mute)',margin:'16px 0'}}>No complaints on record.</p>
-     ):(
-      <div>
-       {categoryShares.map(item=>(
-        <div className="bar" key={item.category} style={{gridTemplateColumns:'150px 1fr 45px'}}>
-         <span style={{fontSize:'.88rem',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{item.category}</span>
-         <div style={{width:`${item.pct}%`}}/>
-         <b style={{fontSize:'.85rem'}}>{item.pct}%</b>
-        </div>
-       ))}
-      </div>
-     )}
-    </div>
-   </div>
-
-   {/* 5. CREW WORKLOAD & LAST SEEN TABLE */}
-   <div className="panel mt">
-    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8,marginBottom:12}}>
-     <div>
-      <b style={{fontSize:'1.1rem'}}>Crew performance & Workload</b>
-      <p style={{margin:'2px 0 0',color:'var(--mute)',fontSize:'.88rem'}}>Live crew status, resolution speeds, and location tracking.</p>
-     </div>
-     <button className="btn ghost" style={{padding:'6px 12px',fontSize:'.85rem'}} onClick={fetchAll}>Refresh crews</button>
-    </div>
-
-    <div className="scroll">
-     <table>
-      <thead>
-       <tr>
-        <th>Crew Member</th>
-        <th>Open Jobs</th>
-        <th>Cleared This Week</th>
-        <th>Avg Clear Time</th>
-        <th>Workload</th>
-        <th>Location</th>
-       </tr>
-      </thead>
-      <tbody>
-       {crews.map(c=>{
-        const assignedJobs=rows.filter(r=>r.collector_id===c.id&&r.status==='assigned');
-        const clearedWeekJobs=rows.filter(r=>r.collector_id===c.id&&r.status==='cleared'&&r.cleared_at&&new Date(r.cleared_at).getTime()>=oneWeekAgo);
-        const allClearedWithTime=rows.filter(r=>r.collector_id===c.id&&r.status==='cleared'&&r.cleared_at);
-        const avgMs=allClearedWithTime.length>0
-         ?allClearedWithTime.reduce((acc,r)=>acc+(new Date(r.cleared_at!).getTime()-new Date(r.created_at).getTime()),0)/allClearedWithTime.length
-         :0;
-        const totalOpen=openRows.length||1;
-        const workloadPct=Math.min(100,Math.round((assignedJobs.length/totalOpen)*100));
-
-        const lastSeenText=c.location_at
-         ?`${Math.floor((Date.now()-new Date(c.location_at).getTime())/60000)} min ago`
-         :'Never';
-
-        return (
-         <tr key={c.id}>
-          <td>
-           <b>{c.name||'Crew member'}</b>
-           {c.email&&<small style={{display:'block',color:'var(--mute)'}}>{c.email}</small>}
-          </td>
-          <td><b>{assignedJobs.length}</b> open</td>
-          <td>{clearedWeekJobs.length}</td>
-          <td>{allClearedWithTime.length>0?formatDuration(avgMs):'N/A'}</td>
-          <td style={{minWidth:120}}>
-           <div style={{display:'flex',alignItems:'center',gap:8}}>
-            <div style={{flex:1,height:8,background:'var(--line)',borderRadius:4,overflow:'hidden'}}>
-             <div style={{width:`${workloadPct}%`,height:'100%',background:'var(--route)'}}/>
-            </div>
-            <small style={{fontSize:'.75rem'}}>{assignedJobs.length}</small>
-           </div>
-          </td>
-          <td>
-           <small style={{color:'var(--mute)'}}>
-            Location: last seen {lastSeenText}
-           </small>
-          </td>
-         </tr>
-        );
-       })}
-       {crews.length===0&&<tr><td colSpan={6}>No collectors yet. Add one below.</td></tr>}
-      </tbody>
-     </table>
-    </div>
-   </div>
-
-   {/* 6. CREATE COLLECTOR ACCOUNT */}
-   <div className="panel mt">
-    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
-     <div>
-      <b style={{fontSize:'1.1rem'}}>Create Collector Account</b>
-      <p style={{margin:'2px 0 0',color:'var(--mute)',fontSize:'.88rem'}}>Directly register a new crew member without modifying database tables.</p>
-     </div>
-    </div>
-    <form onSubmit={handleCreateCollector} style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))',gap:12,alignItems:'end',marginTop:12}}>
-     <div>
-      <label htmlFor="col-name" style={{margin:'0 0 4px',fontSize:'.85rem'}}>Full Name</label>
-      <input id="col-name" type="text" placeholder="e.g. Maya Lin" value={collectorName} onChange={e=>setCollectorName(e.target.value)} required/>
-     </div>
-     <div>
-      <label htmlFor="col-email" style={{margin:'0 0 4px',fontSize:'.85rem'}}>Email</label>
-      <input id="col-email" type="email" placeholder="collector@kerbside.com" value={collectorEmail} onChange={e=>setCollectorEmail(e.target.value)} required/>
-     </div>
-     <div>
-      <label htmlFor="col-pw" style={{margin:'0 0 4px',fontSize:'.85rem'}}>Password</label>
-      <input id="col-pw" type="password" placeholder="Min 6 characters" value={collectorPassword} onChange={e=>setCollectorPassword(e.target.value)} required/>
-     </div>
-     <div>
-      <button className="btn hi" style={{width:'100%',padding:'11px'}} disabled={collectorBusy}>{collectorBusy?'Creating…':'Add Collector'}</button>
-     </div>
-    </form>
-    {collectorMsg.t&&<p className={`msg ${collectorMsg.c}`} role="status" style={{marginTop:8}}>{collectorMsg.t}</p>}
-   </div>
-
-   {/* 7. ALL COMPLAINTS TABLE & AUTO ASSIGN */}
-   <div className="panel mt">
-    <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
-     <b style={{marginRight:'auto',fontSize:'1.1rem'}}>All complaints ({rows.length})</b>
-     <button className="btn hi" onClick={handleAutoAssign}>Auto-assign by nearest crew</button>
-     <button className="btn ghost" style={{margin:0}} onClick={exportCsv}>Export CSV</button>
-    </div>
-    {msg&&<p className="msg" role="status">{msg}</p>}
-
-    <div className="scroll">
-     <table>
-      <thead>
-       <tr>
-        <th>Category</th>
-        <th>Note</th>
-        <th>Priority</th>
-        <th>Target / Due</th>
-        <th>Status</th>
-        <th>Crew</th>
-       </tr>
-      </thead>
-      <tbody>
-       {rows.map(r=>(
-        <tr key={r.id}>
-         <td>
-          <b>{r.category}</b>
-          <small style={{display:'block',color:'var(--mute)'}}>{r.support} support ({r.voters} votes)</small>
-         </td>
-         <td>{r.description}</td>
-         <td>
-          <PriorityBadge priority={r.priority} needsReview={r.needs_review} />
-         </td>
-         <td>
-          <small style={{color:'var(--route)',fontWeight:600}}>{targetClearText(r.due_at)}</small>
-         </td>
-         <td>
-          <StatusBadge status={r.status} />
-         </td>
-         <td>
-          {r.status==='cleared'?nameOf(r.collector_id):(
-           <select aria-label="Assign crew" value={r.collector_id??''} onChange={e=>assign(r.id,e.target.value)}>
-            <option value="">Unassigned</option>
-            {crews.map(c=><option key={c.id} value={c.id}>{c.name||c.email||c.id.slice(0,6)}</option>)}
-           </select>
-          )}
-         </td>
-        </tr>
-       ))}
-       {rows.length===0&&<tr><td colSpan={6}>No complaints yet.</td></tr>}
-      </tbody>
-     </table>
-    </div>
-   </div>
-
-   {/* 8. USER ROLES */}
-   <div className="panel mt">
-    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
-     <div>
-      <b style={{fontSize:'1.1rem'}}>User Roles ({people.length})</b>
-      <p style={{margin:'2px 0 0',color:'var(--mute)',fontSize:'.88rem'}}>Promote or change user roles instantly.</p>
-     </div>
-     <button className="btn ghost" style={{margin:0,padding:'6px 12px',fontSize:'.85rem'}} onClick={fetchAll}>Refresh</button>
-    </div>
-    <div className="scroll">
-     <table>
-      <thead>
-       <tr>
-        <th>Name</th>
-        <th>Email</th>
-        <th>Role</th>
-        <th>Points</th>
-        <th>Change Access</th>
-       </tr>
-      </thead>
-      <tbody>
-       {people.map(p=>(
-        <tr key={p.id}>
-         <td>{p.name||'(No name)'}</td>
-         <td><small style={{color:'var(--mute)'}}>{p.email||'N/A'}</small></td>
-         <td><span className={`badge ${p.role==='collector'?'route':p.role==='admin'?'done':''}`}>{p.role}</span></td>
-         <td>{p.points}</td>
-         <td>
-          <select aria-label={`Change role for ${p.name||p.id}`} value={p.role} onChange={e=>handleRoleChange(p.id,e.target.value as any)} style={{width:'auto',padding:'4px 8px',margin:0}}>
-           <option value="citizen">Citizen</option>
-           <option value="collector">Collector</option>
-           <option value="admin">Admin</option>
-          </select>
-         </td>
-        </tr>
-       ))}
-       {people.length===0&&<tr><td colSpan={5}>No users found.</td></tr>}
-      </tbody>
-     </table>
-    </div>
-   </div>
-  </div>
- );
+   <div className="team-forms"><form className="panel form-panel" onSubmit={handleCreateCollector}><div className="panel-heading"><span className="section-symbol"><Icon name="users"/></span><div><h2>Add a collector</h2><p>Give a crew member access to field operations.</p></div></div>
+    <label htmlFor="col-name">Full name</label><input id="col-name" type="text" placeholder="e.g. Asha Kumar" value={collectorName} onChange={e=>setCollectorName(e.target.value)} required/>
+    <label htmlFor="col-email">Email address</label><input id="col-email" type="email" placeholder="collector@example.com" value={collectorEmail} onChange={e=>setCollectorEmail(e.target.value)} required/>
+    <label htmlFor="col-pw">Temporary password</label><input id="col-pw" type="password" placeholder="At least 6 characters" autoComplete="new-password" value={collectorPassword} onChange={e=>setCollectorPassword(e.target.value)} required minLength={6}/>
+    <p className="field-help">Ask the collector to reset their password after signing in.</p><div className="form-footer"><button className="btn hi" disabled={collectorBusy}><Icon name="plus" size={17}/>{collectorBusy?'Creating…':'Add collector'}</button></div>{collectorMsg.t&&<p className={`msg ${collectorMsg.c}`} role="status">{collectorMsg.t}</p>}
+   </form><div className="panel"><div className="panel-heading split"><div><h2>Workspace access</h2><p>Manage roles for residents, collectors, and administrators.</p></div><span className="count-pill">{people.length} people</span></div><div className="table-container"><div className="scroll"><table><thead><tr><th>Person</th><th>Points</th><th>Role</th></tr></thead><tbody>{people.map(p=><tr key={p.id}><td><b>{p.name||'Unnamed account'}</b><small>{p.email||'No email available'}</small></td><td>{p.points}</td><td><select aria-label={`Change role for ${p.name||p.id}`} value={p.role} onChange={e=>handleRoleChange(p.id,e.target.value as 'citizen'|'collector'|'admin')}><option value="citizen">Citizen</option><option value="collector">Collector</option><option value="admin">Admin</option></select></td></tr>)}</tbody></table>{!people.length&&<EmptyState title="No people loaded" message="Refresh to check your workspace accounts." icon="users"/>}</div></div></div></div>
+  </div>}
+  <dialog className="report-dialog" ref={dialog} onCancel={()=>setSelectedComplaint(null)} onClose={()=>setSelectedComplaint(null)} aria-labelledby="report-dialog-title">
+   {selected&&<><div className="dialog-heading"><div><span className="eyebrow">REPORT #{selected.id.slice(0,8).toUpperCase()}</span><h2 id="report-dialog-title">{selected.category}</h2></div><button className="icon-button" aria-label="Close report details" onClick={()=>setSelectedComplaint(null)}><Icon name="close"/></button></div><p>{selected.description}</p><ReportBadges status={selected.status} priority={selected.priority} needsReview={selected.needs_review}/><p className="field-help">Reported {new Date(selected.created_at).toLocaleString()} · {selected.support} support</p>
+    <ComplaintDetails key={selected.id} report={selected}/>
+    <div className="dialog-controls"><form onSubmit={handleSetPriority}><label htmlFor="override-priority">Priority override</label><select id="override-priority" value={overridePriority} onChange={e=>setOverridePriority(e.target.value)}><option value="default">Default ({selected.base_priority})</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select><label htmlFor="override-reason">Reason</label><input id="override-reason" type="text" placeholder="Why is this priority changing?" value={overrideReason} onChange={e=>setOverrideReason(e.target.value)}/><button className="btn hi" disabled={overrideBusy}>{overrideBusy?'Saving…':'Save priority'}</button></form><div><label htmlFor="detail-crew">Assigned crew</label>{selected.status==='cleared'||selected.status==='rejected'?<p>{nameOf(selected.collector_id)} · Report closed</p>:<><select id="detail-crew" value={selected.collector_id||''} onChange={e=>assign(selected.id,e.target.value)}><option value="">Unassigned</option>{crews.map(c=><option key={c.id} value={c.id}>{c.name||c.email||'Crew member'}</option>)}</select><button className="btn ghost danger-button" onClick={()=>handleMarkFake(selected.id)}>Mark report as fake</button><p>Rejecting a report deducts 5 points from its reporter.</p></>}</div></div>
+   </>}
+  </dialog>
+ </>;
 }

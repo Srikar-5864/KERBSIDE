@@ -42,6 +42,11 @@ export interface Complaint {
   collector_id: string | null;
   resolution_note: string | null;
   done_image_url: string | null;
+  done_image_path?: string | null;
+  cleared_lat?: number | null;
+  cleared_lng?: number | null;
+  cleared_accuracy?: number | null;
+  cleared_location_at?: string | null;
   upvotes: number; // legacy backwards compatibility
   support: number;
   voters: number;

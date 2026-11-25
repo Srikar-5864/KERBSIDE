@@ -3,6 +3,14 @@ import {supabase} from '../lib/supabase';import {useAuth} from '../auth';import 
 import {COLOR,Complaint,DEPOT} from '../lib/types';import {orderPrioritizedRoute} from '../lib/route';import MapView,{Pt} from '../MapView';
 import FilePicker from '../components/FilePicker';
 import {ReportBadges} from '../components/Badges';
+import ComplaintDetails from '../components/ComplaintDetails';
+import {captureCleanupLocation} from '../lib/geolocation';
+import {CleanupDraft} from '../lib/drafts';
+import {useCleanupDrafts} from '../lib/useCleanupDrafts';
+import Icon from '../components/Icon';
+import StatCard from '../components/StatCard';
+import EmptyState from '../components/EmptyState';
+import {Link} from 'react-router-dom';
 
 function targetClearText(dueAt:string|null|undefined):string{
  if(!dueAt)return '';
@@ -12,72 +20,45 @@ function targetClearText(dueAt:string|null|undefined):string{
  return `Target: overdue by ${Math.abs(diff)} h`;
 }
 
-function Job({r,n,done}:{r:Complaint;n:number;done:()=>void}){
+function Job({r,n,save,pending}:{r:Complaint;n:number;save:(draft:CleanupDraft)=>Promise<void>;pending:boolean}){
+ const {profile}=useAuth();
  const [note,setNote]=useState(''),[file,setFile]=useState<File|null>(null),[err,setErr]=useState(''),[busy,setBusy]=useState(false);
 
  async function clear(){
-  if(!note.trim())return setErr('Add a resolution remark first.');
-  setBusy(true);let url:string|null=null;
-  if(file){
-   const path=`done/${r.id}-${file.name.replace(/[^\w.-]/g,'_')}`;
-   const up=await supabase.storage.from('photos').upload(path,file,{upsert:true});
-   if(up.error){setBusy(false);return setErr(up.error.message)}
-   url=supabase.storage.from('photos').getPublicUrl(path).data.publicUrl;
-  }
-  const {error}=await supabase.from('complaints').update({
-   status:'cleared',
-   resolution_note:note.trim(),
-   done_image_url:url,
-   cleared_at:new Date().toISOString()
-  }).eq('id',r.id);
-  setBusy(false);
-  if(error)return setErr(error.message);
-  done();
+  if(!note.trim()||note.trim().length>2000)return setErr('Add a resolution remark (1 to 2000 characters).');
+  if(!file)return setErr('Add a completion photo as proof of cleanup.');
+  if(!profile)return setErr('Sign in again before clearing this report.');
+  setBusy(true);setErr('');
+  try{
+   const location=await captureCleanupLocation(r);
+   await save({id:crypto.randomUUID(),userId:profile.id,reportId:r.id,note:note.trim(),file,location,createdAt:new Date().toISOString()});
+   setNote('');setFile(null);
+  }catch(e){setErr(e instanceof Error?e.message:'Unable to save cleanup. Please retry.')}finally{setBusy(false)}
  }
 
- return (
-  <li className="item job">
-   <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:8,width:'100%'}}>
-    <div>
-     <b>{n}. {r.category}</b>
-     <small style={{display:'block',marginTop:2}}>{r.description}</small>
-     <div style={{display:'flex',gap:8,alignItems:'center',marginTop:4,flexWrap:'wrap'}}>
-      <small style={{color:'var(--route)',fontWeight:600}}>{targetClearText(r.due_at)}</small>
-     </div>
-    </div>
-    <ReportBadges status={r.status} priority={r.priority} />
-   </div>
-
-   {r.image_url&&<img src={r.image_url} alt="Reported waste" loading="lazy" style={{maxHeight:160,objectFit:'cover'}}/>}
-
-   <input
-    type="text"
-    aria-label="Resolution remark"
-    placeholder="Resolution remark (required)"
-    value={note}
-    onChange={e=>setNote(e.target.value)}
-   />
-
-   {/* Reusable FilePicker */}
-   <FilePicker
-    label="Completion photo (optional)"
-    file={file}
-    onChange={setFile}
-    id={`crew-photo-${r.id}`}
-   />
-
+ return <li className="item job">
+  <div className="job-heading"><span className="job-number">{n}</span><div className="job-copy"><span className="report-reference">REPORT #{r.id.slice(0,6).toUpperCase()}</span><h3>{r.category}</h3><p>{r.description}</p><ReportBadges status={r.status} priority={r.priority}/></div></div>
+  <div className="job-deadline"><Icon name="clock" size={16}/>{targetClearText(r.due_at)}</div>
+  {r.image_url&&<img className="job-photo" src={r.image_url} alt="Reported waste" loading="lazy"/>}
+  {pending?<div className="route-status"><Icon name="cloud" size={18}/><p>Cleanup saved for sync. Your photo and GPS tag are safe on this device.</p></div>:<details className="cleanup-form"><summary>Record cleanup</summary>
+   <label htmlFor={`remark-${r.id}`}>Resolution remark</label><input id={`remark-${r.id}`} type="text" aria-label="Resolution remark" placeholder="Describe what the crew cleared" value={note} maxLength={2000} disabled={busy} onChange={e=>setNote(e.target.value)}/>
+   <FilePicker label="Completion photo (required)" file={file} onChange={setFile} id={`crew-photo-${r.id}`}/>
+   <div className="geofence-note"><Icon name="shield" size={18}/><span>Capture GPS within <b>100 metres</b> of the report pin. Photos and GPS tags can be saved offline.</span></div>
    {err&&<p className="msg err" role="alert">{err}</p>}
-
-   {/* Full width success button */}
-   <button className="btn success full" disabled={busy} onClick={clear}>
-    Mark cleared
-   </button>
-  </li>
- );
+   <button className="btn success full" disabled={busy} onClick={clear}><Icon name={busy?'pin':'check'} size={18}/>{busy?'Capturing GPS & saving…':'Mark cleared'}</button>
+  </details>}
+  <ComplaintDetails report={r}/>
+ </li>;
 }
 
-export default function Crew(){
+export default function Crew({view='route'}:{view?:string}){
  const {profile}=useAuth(),{rows,load}=useComplaints();
+ const queue=useCleanupDrafts(profile!.id,load);
+ const [queueMessage,setQueueMessage]=useState('');
+ async function discardCleanup(id:string){
+  if(!window.confirm('Discard this local cleanup photo and GPS tag?'))return;
+  try{await queue.remove(id)}catch{setQueueMessage('Unable to discard. Please retry.')}
+ }
  const [start,setStart]=useState<[number,number]>(DEPOT);
  const [paused,setPaused]=useState(false);
  const [manualPos,setManualPos]=useState(false);
@@ -179,68 +160,26 @@ export default function Crew(){
   }))
  ];
 
- return (
-  <div className="dash">
-   <div>
-    <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',flexWrap:'wrap',gap:8,marginBottom:8}}>
-     <div>
-      <h2 style={{fontSize:'1.4rem',margin:0}}>Today’s jobs ({mine.length})</h2>
-      <p className="sub" style={{marginBottom:0}}>Ordered by priority (High, Medium, Low) and shortest route.</p>
-     </div>
-     <div style={{display:'flex',gap:6}}>
-      <button className="btn ghost" style={{padding:'6px 14px',fontSize:'.85rem'}} onClick={togglePause}>
-       {paused?'Resume sharing':'Pause sharing'}
-      </button>
-      {manualPos&&(
-       <button className="btn ghost" style={{padding:'6px 14px',fontSize:'.85rem'}} onClick={resumeGps}>
-        Use GPS again
-       </button>
-      )}
-     </div>
-    </div>
-
-    {/* Neutral amber for paused, red only for errors */}
-    <p
-     className={`msg ${isErrorMsg ? 'err' : paused ? 'warn' : 'info'}`}
-     style={{
-      margin:'4px 0 16px',
-      fontSize:'.88rem',
-      fontWeight:500,
-      color: isErrorMsg ? 'var(--bad)' : paused ? '#d97706' : 'var(--mute)'
-     }}
-    >
-     {statusMsg}
-    </p>
-
-    <ul className="list">
-     {mine.length===0&&<li className="item">No open jobs. New assignments appear here live.</li>}
-     {mine.map((r,i)=><Job key={r.id} r={r} n={i+1} done={load}/>)}
-    </ul>
+ const completed=rows.filter(r=>r.collector_id===profile?.id&&r.status==='cleared');
+ const overdue=mine.filter(r=>r.due_at&&new Date(r.due_at).getTime()<Date.now());
+ const saved=<div className="panel"><div className="panel-heading split"><div><h2>Saved cleanups ({queue.drafts.length})</h2><p>Your photos and GPS tags stay on this device until the cleanup is confirmed.</p></div><span className="count-pill">{queue.online?'Online':'Offline'}</span></div>
+  {(queue.error||queueMessage)&&<p className="msg err" role="alert">{queue.error||queueMessage}</p>}
+  {queue.busy&&<p className="msg" role="status">Syncing cleanup evidence…</p>}
+  {!queue.drafts.length&&<EmptyState title="Everything is in sync" message="Cleanups saved offline will appear here until they reach the city office." icon="cloud"/>}
+  <ul className="list">{queue.drafts.map(draft=><li className="item saved-report" key={draft.id}><b>{rows.find(r=>r.id===draft.reportId)?.category||'Saved cleanup'}</b><small>{draft.note}</small><small>GPS {draft.location.lat.toFixed(5)}, {draft.location.lng.toFixed(5)} · ±{Math.round(draft.location.accuracy)} m</small><small>Captured {new Date(draft.location.capturedAt).toLocaleString()}</small>{draft.error&&<p className="msg err">{draft.error}</p>}<div className="detail-actions"><button className="btn ghost" disabled={queue.busy} onClick={()=>discardCleanup(draft.id)}>Discard saved cleanup</button></div></li>)}</ul>
+  {queue.drafts.length>0&&<button className="btn hi mt" disabled={queue.busy||!queue.online} onClick={queue.sync}><Icon name="refresh" size={17}/>Retry saved cleanups</button>}
+ </div>;
+ return <>
+  <div className="page-heading"><div><p className="eyebrow">FIELD OPERATIONS</p><h1>{view==='completed'?'Good work, on the record.':view==='saved'?'Ready to reconnect.':'Your route, ready to go.'}</h1><p>{view==='completed'?'A look back at the cleanups you’ve completed.':view==='saved'?'Offline proof stays with you until it can be safely sent.':'The right priority. The next stop. A cleaner neighborhood.'}</p></div><button className="btn ghost" onClick={load}><Icon name="refresh" size={17}/>Refresh jobs</button></div>
+  {view==='saved'?saved:view==='completed'?<>
+   <div className="metrics-grid"><StatCard label="Cleanups completed" value={completed.length} hint="Every cleanup makes a difference" icon="check"/><StatCard label="Completed this week" value={completed.filter(r=>r.cleared_at&&new Date(r.cleared_at).getTime()>=Date.now()-7*86400000).length} hint="Over the last 7 days" icon="leaf"/></div>
+   {!completed.length?<div className="panel"><EmptyState title="Your first cleanup is ahead" message="Complete an assigned job with a photo and GPS tag to see it here." icon="check"><Link className="btn hi" to="/app?view=route">View your route</Link></EmptyState></div>:<ul className="list completed-grid">{completed.map(r=><li className="item report-card" key={r.id}><div className="report-card-main"><span className="report-thumbnail status-cleared"><Icon name="check" size={24}/></span><div><span className="report-reference">REPORT #{r.id.slice(0,6).toUpperCase()}</span><h3>{r.category}</h3><small>{r.cleared_at?new Date(r.cleared_at).toLocaleDateString():''}</small></div></div><p className="detail-hint">{r.resolution_note||r.description}</p><ComplaintDetails report={r}/></li>)}</ul>}
+  </>:<>
+   <div className="metrics-grid"><StatCard label="Assigned jobs" value={mine.length} hint="Ordered by priority and distance" icon="truck"/><StatCard label="High priority" value={mine.filter(r=>r.priority==='high').length} hint="Start with the most urgent issues" icon="reports" tone="amber"/><StatCard label="Past target time" value={overdue.length} hint="Need a little extra attention" icon="clock" tone="red"/><StatCard label="Saved cleanups" value={queue.drafts.length} hint="Proof waiting to sync" icon="cloud" tone="blue"/></div>
+   {queue.drafts.length>0&&<Link className="queue-notice" to="/app?view=saved"><Icon name="cloud"/><span><b>{queue.drafts.length} saved {queue.drafts.length===1?'cleanup':'cleanups'}</b> waiting to sync</span><span>View saved cleanups</span></Link>}
+   <div className="crew-route-grid"><div><div className="panel-heading split"><div><h2>Today’s jobs ({mine.length})</h2><p>Follow the suggested order, starting with high priority.</p></div><span className="count-pill">{mine.length} stops</span></div><ul className="list">{mine.map((r,i)=><Job key={r.id} r={r} n={i+1} save={queue.save} pending={queue.drafts.some(d=>d.reportId===r.id)}/>)}</ul>{!mine.length&&<div className="panel"><EmptyState title="You’re all caught up" message="New assignments will appear here as reports come in." icon="check"/></div>}</div>
+    <div className="route-map-column"><div className="panel map-panel"><div className="panel-heading split"><div><h2>Your collection route</h2><p>Tap the map to adjust your starting point.</p></div><Icon name="pin"/></div><MapView height={390} route={path} points={mapPoints} onPick={handleMapPick}/><div className="map-legend"><span><i style={{background:'#14233a'}}/>Your starting point</span><span><i style={{background:'#2b6cff'}}/>Assigned job</span><span><i style={{background:'#c8402f'}}/>High priority</span></div><div className={`route-status ${isErrorMsg?'is-error':''}`} role="status"><Icon name={paused?'clock':'pin'} size={18}/><p>{!queue.online?'Offline. GPS and cleanup proof can still be saved on this device.':statusMsg}</p></div><div className="route-controls"><button className="btn ghost" onClick={togglePause}>{paused?'Resume sharing':'Pause sharing'}</button>{manualPos&&<button className="btn ghost" onClick={resumeGps}>Use GPS again</button>}</div></div><div className="help-card"><Icon name="shield" size={24}/><div><h3>Proof, right at the source.</h3><p>Each cleanup needs a photo, a short remark, and an accurate GPS tag within 100 metres of the pin.</p></div></div></div>
    </div>
-
-   <div>
-    <MapView height={460} route={path} points={mapPoints} onPick={handleMapPick}/>
-
-    {/* Crew Map Legend */}
-    <div className="map-legend">
-     <span className="map-legend-item">
-      <span className="map-legend-dot" style={{backgroundColor:'#2b6cff'}} aria-hidden="true"/>
-      <span>Assigned job</span>
-     </span>
-     <span className="map-legend-item">
-      <span className="map-legend-ring" aria-hidden="true"/>
-      <span>You (start)</span>
-     </span>
-     <span className="map-legend-item">
-      <span className="map-legend-high" aria-hidden="true">!</span>
-      <span>High priority</span>
-     </span>
-    </div>
-
-    <p style={{fontSize:'.84rem',color:'var(--mute)',marginTop:6}}>
-     Dark ring shows your position. Tap map anytime to adjust starting location by hand.
-    </p>
-   </div>
-  </div>
- );
+  </>}
+ </>;
 }

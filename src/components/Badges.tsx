@@ -35,7 +35,7 @@ const PRIORITY_CONFIG: Record<string, { label: string; bg: string; title: string
 export function PriorityBadge({ priority, needsReview }: PriorityBadgeProps) {
  if (needsReview) {
   return (
-   <span className="priority-badge" style={{ backgroundColor: '#d97706' }} title="Awaiting admin review">
+   <span className="priority-badge" data-priority="review" style={{ backgroundColor: '#d97706' }} title="Awaiting admin review">
     Awaiting review
    </span>
   );
@@ -43,7 +43,7 @@ export function PriorityBadge({ priority, needsReview }: PriorityBadgeProps) {
 
  const conf = PRIORITY_CONFIG[priority] || { label: priority, bg: '#64748b', title: `${priority} priority` };
  return (
-  <span className="priority-badge" style={{ backgroundColor: conf.bg }} title={conf.title}>
+  <span className="priority-badge" data-priority={priority} style={{ backgroundColor: conf.bg }} title={conf.title}>
    {conf.label}
   </span>
  );

@@ -1,9 +1,16 @@
-import {FormEvent,useEffect,useRef,useState} from 'react';
-import {supabase} from '../lib/supabase';import {useAuth} from '../auth';import {useComplaints} from '../lib/useComplaints';
+import {Link} from 'react-router-dom';
+import {FormEvent,useCallback,useEffect,useRef,useState} from 'react';
+import {useAuth} from '../auth';import {useComplaints} from '../lib/useComplaints';
 import {CATEGORIES,COLOR,LABEL} from '../lib/types';import MapView from '../MapView';
 import FilePicker from '../components/FilePicker';
 import {ReportBadges} from '../components/Badges';
 import Community from './Community';
+import ComplaintDetails from '../components/ComplaintDetails';
+import SavedReports from '../components/SavedReports';
+import {useReportDrafts} from '../lib/useReportDrafts';
+import Icon from '../components/Icon';
+import StatCard from '../components/StatCard';
+import EmptyState from '../components/EmptyState';
 
 function targetClearText(dueAt:string|null|undefined):string{
  if(!dueAt)return '';
@@ -13,12 +20,13 @@ function targetClearText(dueAt:string|null|undefined):string{
  return `Target: overdue by ${Math.abs(diff)} h`;
 }
 
-export default function Citizen(){
+export default function Citizen({view='overview'}:{view?:string}){
  const {profile,refresh}=useAuth(),{rows,load}=useComplaints();
- const [tab,setTab]=useState<'mine'|'community'>('mine');
+ const [filter,setFilter]=useState('all');
  const [cat,setCat]=useState(CATEGORIES[0]),[desc,setDesc]=useState(''),[file,setFile]=useState<File|null>(null);
  const [pick,setPick]=useState<[number,number]|null>(null),[msg,setMsg]=useState({t:'',c:''}),[busy,setBusy]=useState(false);
- const [duplicateId,setDuplicateId]=useState<string|null>(null);
+ const sent=useCallback(()=>{refresh();load()},[refresh,load]);
+ const queue=useReportDrafts(profile!.id,sent);
  const seen=useRef<Record<string,string>>({});
 
  useEffect(()=>{
@@ -33,9 +41,11 @@ export default function Citizen(){
  },[rows,refresh]);
 
  function locate(){
+  if(!navigator.geolocation)return setMsg({t:'GPS is unavailable. Tap the map to place the pin.',c:'err'});
   navigator.geolocation?.getCurrentPosition(
    p=>setPick([p.coords.latitude,p.coords.longitude]),
-   ()=>setMsg({t:'Location is blocked. Tap the map to place the pin instead.',c:'err'})
+   ()=>setMsg({t:'Location is blocked. Tap the map to place the pin instead.',c:'err'}),
+   {enableHighAccuracy:true,maximumAge:0,timeout:20000}
   );
  }
 
@@ -43,203 +53,62 @@ export default function Citizen(){
   e.preventDefault();
   const form=e.currentTarget;
   if(!pick)return setMsg({t:'Tap the map or use your location to place the pin.',c:'err'});
-  if(!desc.trim())return setMsg({t:'Add a short note so the crew knows what to look for.',c:'err'});
+  if(!desc.trim()||desc.trim().length>2000)return setMsg({t:'Add a short note so the crew knows what to look for.',c:'err'});
 
-  setBusy(true);
-  setDuplicateId(null);
-  let image:string|null=null;
-  if(file){
-   const path=`${profile!.id}/${Date.now()}-${file.name.replace(/[^\w.-]/g,'_')}`;
-   const up=await supabase.storage.from('photos').upload(path,file);
-   if(up.error){
-    setBusy(false);
-    return setMsg({t:'Photo upload failed: '+up.error.message,c:'err'});
-   }
-   image=supabase.storage.from('photos').getPublicUrl(path).data.publicUrl;
-  }
-
-  const {data,error}=await supabase.rpc('submit_complaint',{
-   p_category:cat,
-   p_description:desc,
-   p_lat:pick[0],
-   p_lng:pick[1],
-   p_image:image
-  });
-  setBusy(false);
-  if(error)return setMsg({t:error.message,c:'err'});
-
-  if(data?.result==='duplicate'){
-   setDuplicateId(data.id);
-   setMsg({t:'This is already reported nearby.',c:'err'});
-  }else{
-   setMsg({t:'Report sent. You earned 2 points.',c:'good'});
-   form.reset();
-   setDesc('');
-   setFile(null);
-   setPick(null);
-   refresh();
-   load();
-  }
+  setBusy(true);setMsg({t:'',c:''});
+  try{
+   await queue.save({id:crypto.randomUUID(),userId:profile!.id,category:cat,description:desc.trim(),lat:pick[0],lng:pick[1],file,createdAt:new Date().toISOString()});
+   form.reset();setDesc('');setFile(null);setPick(null);
+   setMsg({t:queue.online?'Report saved. Sending now; check Saved reports for progress.':'Report and photo saved on this device. They will send when this app reconnects.',c:'good'});
+   await queue.sync();
+  }catch(e){setMsg({t:e instanceof Error?e.message:'Could not save your report. Keep this form open and retry.',c:'err'})}finally{setBusy(false)}
  }
 
- async function supportDuplicate(){
-  if(!duplicateId||!pick)return;
-  setBusy(true);
-  const {data,error}=await supabase.rpc('cast_vote',{
-   p_complaint:duplicateId,
-   p_lat:pick[0],
-   p_lng:pick[1]
-  });
-  setBusy(false);
-  if(error){
-   setMsg({t:error.message,c:'err'});
-  }else{
-   setMsg({t:'Supported existing report nearby!',c:'good'});
-   setDuplicateId(null);
-   setDesc('');
-   setFile(null);
-   setPick(null);
-   refresh();
-   load();
-  }
- }
-
- return (
-  <div>
-   <div className="tabs" role="tablist" aria-label="Resident tabs" style={{marginBottom:20}}>
-    <button
-     role="tab"
-     id="tab-mine"
-     aria-selected={tab==='mine'}
-     aria-controls="panel-mine"
-     onClick={()=>{setTab('mine');setDuplicateId(null);}}
-    >
-     My reports
-    </button>
-    <button
-     role="tab"
-     id="tab-community"
-     aria-selected={tab==='community'}
-     aria-controls="panel-community"
-     onClick={()=>{setTab('community');setDuplicateId(null);}}
-    >
-     Community
-    </button>
+ const active=rows.filter(r=>r.status==='reported'||r.status==='assigned');
+ const cleared=rows.filter(r=>r.status==='cleared');
+ const visible=rows.filter(r=>filter==='all'||(filter==='open'?r.status==='reported'||r.status==='assigned':r.status===filter));
+ const points=rows.map(r=>({id:r.id,lat:r.lat,lng:r.lng,color:COLOR[r.status],label:`${r.category}: ${LABEL[r.status]}`,highPriority:r.priority==='high'}));
+ if(view==='community')return <Community/>;
+ if(view==='saved')return <><div className="page-heading"><div><p className="eyebrow">READY WHEN YOU ARE</p><h1>Saved reports</h1><p>Your drafts stay safe, even when your connection doesn’t.</p></div><Link className="btn hi" to="/app?view=report"><Icon name="plus"/>New report</Link></div><SavedReports queue={queue}/></>;
+ if(view==='report')return <>
+  <div className="page-heading"><div><p className="eyebrow">MAKE A DIFFERENCE</p><h1>Report an issue</h1><p>A little detail helps the right crew get to the right place.</p></div><Link className="btn ghost" to="/app?view=overview">Your reports</Link></div>
+  <form className="report-builder" onSubmit={submit}>
+   <div className="panel form-panel">
+    <div className="panel-heading"><span className="section-symbol"><Icon name="reports"/></span><div><h2>What needs attention?</h2><p>Tell us what you spotted in your neighborhood.</p></div></div>
+    <label htmlFor="c">Issue category</label><select id="c" value={cat} onChange={e=>setCat(e.target.value)}>{CATEGORIES.map(c=><option key={c}>{c}</option>)}</select>
+    <label htmlFor="n">Short note</label><textarea id="n" value={desc} onChange={e=>setDesc(e.target.value)} maxLength={2000} placeholder="For example: a pile of waste beside the north gate, blocking the footpath." rows={5}/>
+    <span className="field-help">Describe the spot and anything the crew should know.</span>
+    <div className="photo-field"><FilePicker label="Add a photo (optional)" file={file} onChange={setFile} id="citizen-photo-picker"/><p className="field-help">A clear photo helps us assess the issue. Images up to 5 MB.</p></div>
+    {msg.t&&<p className={`msg ${msg.c}`} role="status">{msg.t}</p>}
+    <div className="form-footer"><span><Icon name="shield" size={17}/>Saved safely before sending</span><button className="btn hi" disabled={busy||queue.busy}><Icon name={queue.online?'plus':'cloud'}/>{busy?'Saving…':queue.online?'Send report':'Save report offline'}</button></div>
    </div>
-
-   {tab==='community'?(
-    <div id="panel-community" role="tabpanel" aria-labelledby="tab-community">
-     <Community/>
-    </div>
-   ):(
-    <div id="panel-mine" role="tabpanel" aria-labelledby="tab-mine" className="dash">
-     <form className="panel" onSubmit={submit}>
-      <b>New report</b>
-      <label htmlFor="c">What’s the problem?</label>
-      <select id="c" value={cat} onChange={e=>setCat(e.target.value)}>
-       {CATEGORIES.map(c=><option key={c}>{c}</option>)}
-      </select>
-
-      <label htmlFor="n">Short note</label>
-      <textarea id="n" value={desc} onChange={e=>setDesc(e.target.value)} placeholder="Where exactly, and how bad?"/>
-
-      {/* REUSABLE FILE PICKER */}
-      <FilePicker
-       label="Photo (optional)"
-       file={file}
-       onChange={setFile}
-       id="citizen-photo-picker"
-      />
-
-      <p style={{margin:'12px 0 0',color:'var(--mute)',fontSize:'.92rem'}}>{pick?'Pin placed.':'Tap the map to place the pin.'}</p>
-      <p className="msg" role="status" style={{color:msg.c==='err'?'var(--bad)':'var(--ok)'}}>{msg.t}</p>
-
-      {duplicateId?(
-       <div style={{display:'flex',gap:8,marginTop:12}}>
-        <button type="button" className="btn hi" disabled={busy} onClick={supportDuplicate}>
-         Support it instead
-        </button>
-        <button type="button" className="btn ghost" onClick={()=>setDuplicateId(null)}>
-         Cancel
-        </button>
-       </div>
-      ):(
-       <div style={{display:'flex',gap:8,marginTop:12,flexWrap:'wrap'}}>
-        <button className="btn hi" disabled={busy}>{busy?'Sending…':'Send report'}</button>
-        <button type="button" className="btn ghost" onClick={locate}>Use my location</button>
-       </div>
-      )}
-     </form>
-
-     <div>
-      {/* Map with Status-based coloring and high-priority marker */}
-      <MapView
-       height={320}
-       pick={pick}
-       onPick={(a,b)=>setPick([a,b])}
-       points={rows.map(r=>({
-        id:r.id,
-        lat:r.lat,
-        lng:r.lng,
-        color:COLOR[r.status]||'#2b6cff',
-        label:`${r.category} (${r.priority} priority): ${LABEL[r.status]}`,
-        highPriority:r.priority==='high'
-       }))}
-      />
-
-      {/* Resident Map Legend */}
-      <div className="map-legend">
-       <span className="map-legend-item">
-        <span className="map-legend-dot" style={{backgroundColor:'#c8402f'}} aria-hidden="true"/>
-        <span>Reported</span>
-       </span>
-       <span className="map-legend-item">
-        <span className="map-legend-dot" style={{backgroundColor:'#2b6cff'}} aria-hidden="true"/>
-        <span>Crew on the way</span>
-       </span>
-       <span className="map-legend-item">
-        <span className="map-legend-dot" style={{backgroundColor:'#2f7d57'}} aria-hidden="true"/>
-        <span>Cleared</span>
-       </span>
-       <span className="map-legend-item">
-        <span className="map-legend-high" aria-hidden="true">!</span>
-        <span>High priority</span>
-       </span>
-      </div>
-
-      <h2 className="mt" style={{fontSize:'1.3rem'}}>Your reports</h2>
-      <ul className="list">
-       {rows.length===0&&<li className="item">No reports yet. Place a pin to send your first.</li>}
-       {rows.map(r=>{
-        const isAwaiting=(r.needs_review || (r.category==='Other' && !r.priority_override));
-        return (
-         <li className="item" key={r.id}>
-          <div>
-           <b>{r.category}</b>
-           <small>{r.description}{r.voters>1?` (${r.voters} residents)`:''}</small>
-           <div style={{display:'flex',gap:8,alignItems:'center',marginTop:4,flexWrap:'wrap'}}>
-            {r.due_at&&r.status!=='cleared'&&r.status!=='rejected'&&(
-             <small style={{color:'var(--route)',fontWeight:600}}>{targetClearText(r.due_at)}</small>
-            )}
-            {r.status==='cleared'&&r.resolution_note&&(
-             <small style={{color:'var(--ok)'}}>Crew note: {r.resolution_note}</small>
-            )}
-           </div>
-          </div>
-
-          {/* Consistent Badges in top right row */}
-          <ReportBadges
-           status={r.status}
-           priority={r.status!=='rejected'?r.priority:undefined}
-           needsReview={isAwaiting}
-          />
-         </li>
-        );
-       })}
-      </ul>
-     </div>
-    </div>
-   )}
+   <div className="report-location-column">
+    <div className="panel map-panel"><div className="panel-heading"><span className="section-symbol"><Icon name="pin"/></span><div><h2>Pin the location</h2><p>Tap the map to mark the exact spot.</p></div></div><MapView height={330} pick={pick} onPick={(a,b)=>setPick([a,b])} points={points}/><div className="location-actions"><span className={pick?'location-ready':'field-help'}>{pick?`Pin: ${pick[0].toFixed(5)}, ${pick[1].toFixed(5)}`:'No location selected yet'}</span><button type="button" className="btn ghost" disabled={busy} onClick={locate}><Icon name="pin" size={17}/>Use my location</button></div></div>
+    <div className="help-card"><Icon name="leaf" size={25}/><div><h3>Your report makes a difference</h3><p>We’ll match your report to a crew. Track its progress, ask questions, and see the cleanup photos from your dashboard.</p></div></div>
+   </div>
+  </form>
+ </>;
+ return <>
+  <div className="page-heading"><div><p className="eyebrow">YOUR NEIGHBORHOOD, A LITTLE BETTER</p><h1>Hello, {profile?.name?.split(' ')[0]||'neighbor'}<span className="heading-accent">.</span></h1><p>Keep track of the changes you’re helping make.</p></div><Link className="btn hi" to="/app?view=report"><Icon name="plus"/>New report</Link></div>
+  <div className="metrics-grid">
+   <StatCard label="Your reports" value={rows.length} hint="Every report starts a change" icon="reports"/>
+   <StatCard label="In progress" value={active.length} hint="Reported or assigned to a crew" icon="clock" tone="amber"/>
+   <StatCard label="Cleanups completed" value={cleared.length} hint="A cleaner place for everyone" icon="check"/>
+   <StatCard label="Community points" value={profile?.points||0} hint="Earned for your contribution" icon="leaf" tone="blue"/>
   </div>
- );
+  {msg.t&&<p className={`msg ${msg.c}`} role="status">{msg.t}</p>}
+  {queue.drafts.length>0&&<Link className="queue-notice" to="/app?view=saved"><Icon name="cloud"/><span><b>{queue.drafts.length} saved {queue.drafts.length===1?'report':'reports'}</b> waiting on this device</span><span>View saved reports</span></Link>}
+  <div className="citizen-overview-grid">
+   <div className="panel reports-panel"><div className="panel-heading split"><div><h2>Your reports</h2><p>From the first pin to the final cleanup.</p></div><span className="count-pill">{rows.length} total</span></div>
+    <div className="filter-chips" aria-label="Filter your reports">{[['all','All reports'],['open','In progress'],['cleared','Cleared'],['rejected','Rejected']].map(([value,label])=><button type="button" key={value} aria-pressed={filter===value} onClick={()=>setFilter(value)}>{label}</button>)}</div>
+    <ul className="list report-list">{visible.map(r=><li className="item report-card" key={r.id} id={`report-${r.id}`}>
+     <div className="report-card-main"><span className={`report-thumbnail status-${r.status}`}>{r.image_url?<img src={r.image_url} alt={r.category} loading="lazy"/>:<Icon name={r.status==='cleared'?'check':'reports'} size={24}/>}</span><div className="report-card-copy"><span className="report-reference">REPORT #{r.id.slice(0,6).toUpperCase()}</span><h3>{r.category}</h3><p>{r.description}</p></div></div>
+     <div className="report-card-meta"><ReportBadges status={r.status} priority={r.status!=='rejected'?r.priority:undefined} needsReview={r.needs_review}/><span><Icon name="clock" size={15}/>{r.status==='cleared'?'Cleanup completed':r.status==='rejected'?'Review completed':targetClearText(r.due_at)}</span></div>
+     <ComplaintDetails report={r}/>
+    </li>)}</ul>
+    {!visible.length&&<EmptyState title={rows.length?'No reports in this view':'Your first report starts here'} message={rows.length?'Try another filter to find your reports.':'Spotted something that needs a cleanup? Place a pin and let your local crew know.'}><Link className="btn hi" to="/app?view=report"><Icon name="plus"/>Report an issue</Link></EmptyState>}
+   </div>
+   <div className="overview-side"><div className="panel map-panel"><div className="panel-heading split"><div><h2>Your neighborhood</h2><p>Your reports, on the map.</p></div><Icon name="pin"/></div><MapView height={310} points={points}/><div className="map-legend"><span><i style={{background:'#c8402f'}}/>Reported</span><span><i style={{background:'#2b6cff'}}/>Assigned</span><span><i style={{background:'#2f7d57'}}/>Cleared</span></div></div><div className="community-invite"><span className="section-symbol"><Icon name="users"/></span><h3>Better, together.</h3><p>See what your neighbors have reported and support the issues that matter to you.</p><Link className="btn ghost" to="/app?view=community">Explore community</Link></div></div>
+  </div>
+ </>;
 }
